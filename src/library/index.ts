@@ -102,8 +102,12 @@ export async function autoClosePage<T>(
       throw error;
     }
   } finally {
-    await page.close();
-    await browser.disconnect();
+    try {
+      await page.close();
+      await browser.disconnect();
+    } catch (error) {
+      // 忽略由用户提前 close 触发的错误
+    }
 
     if (retry && !ret) {
       ret = {
@@ -144,9 +148,7 @@ async function checkPagesTimeout(
 }
 
 async function markOpenedTimestamp(page: Puppeteer.Page): Promise<void> {
-  await page.waitForNavigation().then(() =>
-    page.addScriptTag({
-      content: '_puppeteer_page_timestamp = Date.now()',
-    }),
-  );
+  await page.addScriptTag({
+    content: '_puppeteer_page_timestamp = Date.now()',
+  });
 }
