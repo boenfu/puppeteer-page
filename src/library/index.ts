@@ -41,6 +41,7 @@ export async function puppeteerPage(
   options: PuppeteerRemoteOptions | Puppeteer.Browser,
 ): Promise<Puppeteer.Page> {
   const browser =
+    // Browser.isConnected
     'isConnected' in options ? options : await puppeteerBrowser(options);
 
   return browser.newPage();
@@ -52,26 +53,50 @@ export interface AutoClosePageOptions extends PuppeteerRemoteOptions {
    */
   retry?: boolean;
   /**
-   * @deprecated
    * 自动清理选项
    */
   autoClean?: {
     /**
-     * 清理打开时间超时的 page
+     * 清理打开时间超时的 page (单位秒)
+     * default: 300 s
      */
     timeout?: number;
   };
 }
 
-export async function autoClosePage(
-  fn: (page: Puppeteer.Page) => Promise<void> | void,
-  {retry, ...options}: AutoClosePageOptions,
-): Promise<void> {
+export async function autoClosePage<T>(
+  fn: (page: Puppeteer.Page) => Promise<T> | T,
+  {retry, autoClean: {timeout = 300} = {}, ...options}: AutoClosePageOptions,
+): Promise<T> {
   const browser = await puppeteerBrowser(options);
   const page = await puppeteerPage(browser);
 
+  // 监听页面跳转，重新打时间戳
+  await page.setRequestInterception(true);
+
+  page.on('request', request => {
+    let parentFrame = request.frame()?.parentFrame();
+
+    if (request.isNavigationRequest() && parentFrame === null) {
+      page.waitForNavigation().then(
+        () => markOpenedTimestamp(page),
+        () => {},
+      );
+    }
+
+    return request.continue();
+  });
+
+  await checkPagesTimeout(browser, timeout);
+
+  let ret!: {
+    value: T | undefined;
+  };
+
   try {
-    await fn(page);
+    ret = {
+      value: await fn(page),
+    };
   } catch (error) {
     if (!retry) {
       throw error;
@@ -80,8 +105,48 @@ export async function autoClosePage(
     await page.close();
     await browser.disconnect();
 
-    if (retry) {
-      await autoClosePage(fn, options);
+    if (retry && !ret) {
+      ret = {
+        value: await autoClosePage(fn, options),
+      };
     }
   }
+
+  return ret.value!;
+}
+
+declare global {
+  interface Window {
+    _puppeteer_page_timestamp: number;
+  }
+}
+
+async function checkPagesTimeout(
+  browser: Puppeteer.Browser,
+  timeout: number,
+): Promise<void> {
+  for (let page of await browser.pages()) {
+    let timestamp = await page.evaluate(
+      () => window['_puppeteer_page_timestamp'],
+    );
+
+    if (!timestamp) {
+      await markOpenedTimestamp(page);
+      continue;
+    }
+
+    if ((Date.now() - +timestamp) / 1000 < timeout) {
+      continue;
+    }
+
+    await page.close();
+  }
+}
+
+async function markOpenedTimestamp(page: Puppeteer.Page): Promise<void> {
+  await page.waitForNavigation().then(() =>
+    page.addScriptTag({
+      content: '_puppeteer_page_timestamp = Date.now()',
+    }),
+  );
 }
